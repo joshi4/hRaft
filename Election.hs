@@ -107,15 +107,7 @@ data RaftState = Raft {
 
 
 
---class TermGetter a where
---  term :: a  -> Term
-
--- instance TermGetter RaftState where
---   term Raft (_ ,t, _ ,_,_,_,_,_,_,_ ) = t 
-
-
 -- Instances to serialize stuff so it can be decoded, encoded 
-
 instance Serialize SockAddr where
   put sa = let str = show sa  -- ^ convert SAddr to String 
            in put str
@@ -431,13 +423,13 @@ TODO
 1. sendMessage does not retry if peer is down. ( need a way of detecting that.)
 2. receiveMsgAsFollower  ->  need to implement  AppendEntrie Messages
 3. In tallyVotes I need to take care of the fact that he may recieve a heartbeat message from another leader or a RequestForVote from another candidate. 
-4. removed teh //lism from broadcast function. as it was causing stupid race conditions. So removed the //ism
+
 5. Debug: When both are candidates shit hits the fan. ( debugged )
-6. In tallyVotes why do I need to clsoe the socket in one place ( the last case ) and not in the others ? ( because otehrwise it wont work )
+
 7. In runAsFollower right now only timing out if i don't receive a message for a certain amount of time.
    need to time out if i during that amount of time, I haven't received a heartbeat or given a vote regardless of what messages i've received.
-8. Right now I am too strict in denying votes in handlVoteReply : just cause as a follower I have voted for some one does not mean I keep on rejecting.
-   Read the paper to fix this, it depends on some of the index stuff as well.
+
+
 9. If candidate/follower receives heartbeat whose term is out of date, leader should quit and become a follower, update term to up to date value.
 
 -}
