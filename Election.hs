@@ -286,11 +286,6 @@ sendMessage msg myaddr peer = bracket (socket AF_INET Datagram 0) sClose
                        )
 
 
-testSendMessage :: IO ()
-testSendMessage = do
-  sa1  <-  ( getSockAddr ("localhost", "8005"))
-  sa2  <- ( getSockAddr ("localhost", "8006"))
-  sendMessage Empty sa1 sa2
 
 getMySockAddr :: RaftState  -> SockAddr
 getMySockAddr raft = let myid = myNode raft
