@@ -162,7 +162,6 @@ initConfiguration = do
   sAddr  <- mapM getSockAddr [("localhost", "8003"), ("localhost", "8001"), ("localhost", "8002")]
   let dictList = zip ["1","2", "3"] sAddr
   return $ Map.fromList dictList
-  
 
 
 initRaftState :: Configuration  -> String -> RaftState
@@ -179,9 +178,6 @@ initRaftState config node = Raft {
   ,lastApplied = 0 
   }
 
-
- 
-
 initSystem :: String  -> IO RaftState
 initSystem node = do
   configuration  <- initConfiguration
@@ -190,8 +186,6 @@ initSystem node = do
   return $ rs {electionTimeOut = electionTimer}
    
 {-   INITIALIZATION CODE ENDS HERE    -}
-
-
 
 sendMessageTillSuccess :: Socket  -> SockAddr  -> IO ()
 sendMessageTillSuccess s sa  = do
@@ -208,15 +202,13 @@ broadCastMessage raft msg = do
   defAddr  <- getBindAddr "0"
   let mySocketAddr = Map.findWithDefault defAddr self config
       peerList = ( (Map.toList config) \\ [(self, mySocketAddr)] )
-  putStrLn $ "Length of list = " ++ show (length peerList)
   void $ mapM (\(k,peer) ->   do -- removed the forkIO 
-                  putStrLn "Inside map"
                   sendMessage msg mySocketAddr peer
               ) peerList 
-  putStrLn "End of braodcast"
+
            
 
-
+-- Abstracted away the check " candidate is atleast as up to date as server it is requesting for vote"
 candidateUpToDateCheck :: RaftState  -> RequestVote -> SockAddr  -> (Message, RaftState)
 candidateUpToDateCheck raft reqV peer  = let myTerm = currentTerm raft
                                              newReqVT = RequestVoteReply myTerm True
