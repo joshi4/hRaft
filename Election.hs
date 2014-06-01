@@ -13,6 +13,7 @@ import GHC.Generics
 import Data.Serialize
 import System.Timeout (timeout)
 import System.Random hiding (split) -- ^ for election timer 
+
 type Term = Int
 type Host = String
 type PortNum = String 
