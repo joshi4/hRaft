@@ -52,6 +52,7 @@ getLastLogTerm l = let index = getLastLogIndex l
 
 data Message = MRequestVote RequestVote
              | MRequestVoteReply RequestVoteReply
+             | MAppendEntries AppendEntries
              | MHeartbeat AppendEntries
              | Empty 
                deriving (Show, Generic)
@@ -60,6 +61,8 @@ data Message = MRequestVote RequestVote
 data AppendEntries = AppendEntries {
   leaderTerm :: Term,
   leaderId :: SockAddr, -- ^ so follower can redirect the clients
+  prevLogIndex :: Int,
+  prevLogTerm :: Term,
   entries :: Log -- ^ EMPTY for heartbeat
   } deriving (Show, Generic )
 
@@ -80,13 +83,13 @@ data RequestVoteReply = RequestVoteReply {
 
 
 data LeaderState = LeaderState {
-  leaderCommitedHighestIndex :: Int -- ^ keeps track of the highest index it knows to be commited. 
-  ,nextIndexDict :: Map.Map SockAddr Int -- ^ Index of the next log entry leader will send to key. ( init to next expected index in log for leader.)
-  } deriving (Show, Generic)
+  nextIndexDict :: Map.Map SockAddr Int -- ^ Index of the next log entry leader will send to key. ( init to next expected index in log for leader.)
+  ,matchIndexDict :: Map.Map SockAddr Int -- ^ For each server index of highest log entry known to be replicated on the server. 
+  } deriving (Show, Generic, Eq)
 
 
 type Configuration =   Map.Map String SockAddr
-data Role = Follower | Leader | Candidate deriving (Show, Generic, Eq )
+data Role = Follower | Leader LeaderState | Candidate deriving (Show, Generic, Eq )
 
 
 -- This is going to tell me the state of the particular particpant in the
@@ -98,7 +101,7 @@ data RaftState = Raft {
   ,role :: Role
   ,myNode :: String
   ,getlog :: Log
-  ,commitIndex :: Int -- ^ index of the latest commited entry in the log. 
+  ,commitIndex :: Int -- ^ index of the latest commited entry in the log, in this case its the same as lastAppliesd. 
   ,votedFor :: Maybe SockAddr -- ^This is the socketAddress converted to a string
   ,participantsMap :: Configuration
   ,electionTimeOut :: Int 
@@ -122,6 +125,7 @@ instance Serialize Message
 instance Serialize Role 
 instance Serialize LogBlock
 instance Serialize AppendEntries
+instance Serialize LeaderState
 
 
 --- END OF IMPORTS AND DATA DECLARATIONS ---- 
@@ -189,15 +193,21 @@ sendMessageTillSuccess s sa  = do
 broadCastMessage :: RaftState  -> Message  -> IO ()
 broadCastMessage raft msg = do
   putStrLn "Entered braodcast"
-  let config = participantsMap raft
-      self = myNode raft
-  defAddr  <- getBindAddr "0"
-  let mySocketAddr = Map.findWithDefault defAddr self config
-      peerList = ( (Map.toList config) \\ [(self, mySocketAddr)] )
+  let peerList = getPeerList raft
+      mySocketAddr = getMySockAddr raft 
   void $ mapM (\(k,peer) ->   do -- removed the forkIO 
                   sendMessage msg mySocketAddr peer
               ) peerList 
 
+-- Utility function that is used to get list of peers
+-- does not include myself.   
+getPeerList :: RaftState  -> [(String, SockAddr)]
+getPeerList raft = (Map.toList config) \\ [(self, mySocketAddr)]
+  where
+    config = participantsMap raft
+    self = myNode raft
+    mySocketAddr = getMySockAddr raft
+    
            
 
 -- Abstracted away the check " candidate is atleast as up to date as server it is requesting for vote"
@@ -296,25 +306,56 @@ changeRoleToCandidate raft = raft { role = Candidate
                                   }
 
 changeRoleToLeader :: RaftState  -> RaftState
-changeRoleToLeader raft = raft { role = Leader }
+changeRoleToLeader raft = raft { role = Leader $ initLeaderState }
+  where
+    extractSockAddr :: [(String, SockAddr)] -> [SockAddr]
+    extractSockAddr xs = [sa | (_,sa) <- xs ]
+    defNextIndex = getLastLogIndex $ getlog raft
+    defMatchIndex = 0
+    filteredPeerList = (extractSockAddr $ getPeerList raft)
+    nextIndexList = zip  filteredPeerList (cycle [defNextIndex])
+    matchIndexList = zip  filteredPeerList  (cycle [defMatchIndex])
+    initLeaderState = LeaderState { nextIndexDict = Map.fromList nextIndexList
+                                  ,matchIndexDict = Map.fromList matchIndexList
+                                  }
 
 createHeartbeat :: RaftState -> AppendEntries
 createHeartbeat raft = AppendEntries {
   leaderTerm = currentTerm raft 
-  ,leaderId = getMySockAddr raft 
+  ,leaderId = getMySockAddr raft
+  ,prevLogIndex = ( getLastLogIndex $ getlog raft) - 1 -- ^ so if this vlaue is -1 then we know log is empty. 
+  ,prevLogTerm = getLastLogTerm $ getlog raft 
   ,entries = []
   }
 
+
+-- 
 runAsLeader :: RaftState  -> IO ()
-runAsLeader raft' = do
+runAsLeader raft = do
 	putStrLn " I am the leader now "
-  	let raft = changeRoleToLeader raft'
-            heartbeat = createHeartbeat raft 
-        broadCastMessage raft (MHeartbeat heartbeat)
+        let heartbeat =  MHeartbeat $ createHeartbeat raft
+        newByteString  <- timeout heartbeatTimer $ listenToClient raft
+        case newByteString of
+          Nothing  -> broadCastMessage raft heartbeat
+          (Just buf)  -> do
+                         putStrLn $ "Received message" ++ show (decode buf :: Either String String)
+                         broadCastMessage raft heartbeat
         putStrLn "Sending heartbeat"
-   	threadDelay heartbeatTimer
    	runAsLeader raft 
 
+
+
+-- listenToClient listens on a special port till time runs out
+-- if in tht time it has received a new message from client then
+-- that is returned if not then we will block on recvFrom and timer will timeout
+listenToClient :: RaftState  -> IO BS.ByteString
+listenToClient raft  = do
+  splSocketAddr  <- getSockAddr ("localhost", "8888")
+  bracket (socket AF_INET Datagram 0) sClose (\s  -> do
+                                                 bind s splSocketAddr
+                                                 (buf, _) <- NBS.recvFrom s 0x10000
+                                                 return buf 
+                                             )
 
       
 
@@ -339,12 +380,12 @@ runAsCandidate raft' = do
   case decisionIO of
     Nothing  -> putStrLn "Timed Out " >> runAsCandidate raft -- ^ Timed out no leader from my perspective start as candidate again.
     (Just decision) -> case decision of
-      (True, raftS)  -> runAsLeader raftS
+      (True, raftS)  -> runAsLeader $ changeRoleToLeader raftS
       (False, raftS)  -> if role raftS == Follower then runAsFollower raftS else runAsCandidate raftS -- ^ could be that no one wins election
       
       
     
-  -- putStrLn $ "About to enter phase of receiving message to responses to my request for votes. "
+
 
 
 
@@ -395,7 +436,7 @@ testCC str = do
 runSystem :: RaftState  -> IO ()
 runSystem raft = case role raft of
   Follower  -> runAsFollower raft
-  Leader  -> runAsLeader raft
+  (Leader _)  -> runAsLeader raft
   Candidate  -> runAsCandidate raft 
 
 
@@ -405,13 +446,6 @@ main = do
   raft  <- initSystem (head args)
   runSystem raft
 
-
-
-
-
-{-data Role = FollowerRole FollowerState
-          | CandidateRole CandidateState
-          | LeaderState LeaderState -} 
 
 
 
