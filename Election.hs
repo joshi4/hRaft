@@ -393,7 +393,7 @@ runAsCandidate raft' = do
 
 
 -- Accepts incoming messages to candidate; need to handle case when another leader
--- sends it a heartbeat.   
+-- sends it a heartbeat
 tallyVotes :: RaftState  -> Int  -> IO (Bool, RaftState ) 
 tallyVotes raft voteCount 
   | voteCount >= majority = return (True , raft ) 
