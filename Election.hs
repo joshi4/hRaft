@@ -339,8 +339,10 @@ runAsLeader raft = do
         case newByteString of
           Nothing  -> broadCastMessage raft heartbeat
           (Just buf)  -> do
-                         putStrLn $ "Received message" ++ show (decode buf :: Either String String)
-                         broadCastMessage raft heartbeat
+            putStrLn $ "====== Received message " ++ case decode buf of
+              Right s  -> s
+              otherwise  -> "Error!"
+            broadCastMessage raft heartbeat
         putStrLn "Sending heartbeat"
    	runAsLeader raft 
 
