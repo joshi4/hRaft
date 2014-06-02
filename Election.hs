@@ -98,7 +98,10 @@ data LeaderState = LeaderState {
 
 
 type Configuration =   Map.Map String SockAddr
-data Role = Follower | Leader LeaderState | Candidate deriving (Show, Generic, Eq )
+data Role = Follower
+          | Leader {getLeaderState :: LeaderState }
+          | Candidate
+          deriving (Show, Generic, Eq )
 
 
 -- This is going to tell me the state of the particular particpant in the
@@ -391,6 +394,7 @@ replicatLogEntries raft = do
       mySocketAddr = (getMySockAddr raft)
       filteredPeerList = (extractSockAddr $ getPeerList raft)
   case dicts of
+    Nothing  -> putStrLn "Error! replicate Entry should only be called by leader."
     Just (nextIndexMap, matchIndexMap)  -> bracket (socket AF_INET Datagram 0) sClose $ \s -> do
       bind s mySocketAddr
       mapM (sendAppendEntryMessage raft s nextIndexMap ) filteredPeerList
@@ -426,9 +430,32 @@ replicatLogEntries raft = do
            ) filteredPeerList
         -- Now to inspect the MVars, update relevant state and recurse or not.
         -- if things are hunky dory may even have to update the commitIndex of the leaders State
-    Nothing  -> putStrLn "Error! replicate Entry should only be called by leader."
+      turnToFollower  <- takeMVar followerMVar
+      if turnToFollower
+        then
+        runSystem $ raft { role = Follower }
+        else do
+        let oldLS = getLeaderState $ role raft 
+        (nid, mid )  <- takeMVar dictMVar
+        let newLS = oldLS {nextIndexDict = nid,
+                           matchIndexDict = mid
+                          }
+            newCommitIndex = updateCommitIndex [v | (_,v) <- mid ] (commitIndex raft)
+            raftUpdated = raft {role = Leader newLS,
+                                 commitIndex = newCommitIndex
+                               }
+        runAsLeader raftUpdated
+
   
 
+
+-- takes list of matchedIndices, leaders current commitIndex
+-- returns updatedCommitIndex     
+updateCommitIndex :: [Int]  -> Int  -> Int
+updateCommitIndex miL oldC = sortBy sortDesc (oldC : miL)
+  where
+    sortDesc :: Int  -> Int  -> Ordering
+    sortDesc a b = if a < b then GT else LT 
 
 
 -- Based on nextIndexDict value for a particular peer and length of the log
