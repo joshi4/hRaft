@@ -258,7 +258,22 @@ handleRequestVote raft reqV peer
 
 
 
-handleAppendEntries :: RaftState  -> AppendEntries  ->  SockAddr  -> ()
+handleAppendEntries :: RaftState  -> AppendEntries  ->  SockAddr  -> (Message, RaftState)
+handleAppendEntries raft msg peer | leaderterm < myTerm  = (failReply, raft )
+                                  | logConsistencyCheck log indexForMatch termForMatch == False = (failReply, failUpdateRaft raft)
+                                  | otherwise = (successReply, succUpdateRaft raft )
+  where 
+    myTerm = currentTerm raft
+    log = entries raft 
+    leaderterm = leaderTerm msg
+    indexForMatch = prevLogIndex msg
+    termForMatch = prevLogTerm msg
+    failReply = MAppendEntriesReply $ AppendEntriesReply {appTerm = myTerm ,success = False }
+    successReply = MAppendEntriesReply $ AppendEntriesReply {appTerm = myTerm, success = True }
+    logConsistencyCheck :: Log  -> Int  -> Term  -> Bool
+    logConsistencyCheck l i t | length log <= indexForMatch = False
+                              | logterm (log !! indexForMatch) /= termForMatch = False
+                              | otherwise = True 
 
 
 -- Where it receives all the different kinds of messages a follower can receive.
