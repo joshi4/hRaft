@@ -55,6 +55,7 @@ data Message = MRequestVote RequestVote
              | MRequestVoteReply RequestVoteReply
              | MAppendEntries AppendEntries
              | MHeartbeat AppendEntries
+             | MAppendEntriesReply AppendEntriesReply
              | Empty 
                deriving (Show, Generic)
 
@@ -67,6 +68,11 @@ data AppendEntries = AppendEntries {
   entries :: Log -- ^ EMPTY for heartbeat
   } deriving (Show, Generic )
 
+
+data AppendEntriesReply = AppendEntriesReply {
+  appTerm :: Term,
+  success :: Bool
+  }
 
 data RequestVote = RequestVote {
   cTerm :: Term
@@ -330,21 +336,29 @@ createHeartbeat raft = AppendEntries {
   }
 
 
--- 
+createLogBlock :: RaftState -> BS.ByteString  -> LogBlock
+createLogBlock raft bs = LogBlock {
+  logterm = currentTerm raft
+  ,instruction = bs 
+  }
+
+
 runAsLeader :: RaftState  -> IO ()
 runAsLeader raft = do
 	putStrLn " I am the leader now "
-        let heartbeat =  MHeartbeat $ createHeartbeat raft
         newByteString  <- timeout heartbeatTimer $ listenToClient raft
         case newByteString of
-          Nothing  -> broadCastMessage raft heartbeat
+          Nothing  -> replicatLogEntries raft 
           (Just buf)  -> do
+            let newLogBlock = createLogBlock buf
+                oldLog = getlog raft
+                newLog = oldLog ++ newLogBlock
+                raft' = raft {getlog = newLog }
             putStrLn $ "====== Received message " ++ case decode buf of
               Right s  -> s
               otherwise  -> "Error!"
-            broadCastMessage raft heartbeat
-        putStrLn "Sending heartbeat"
-   	runAsLeader raft 
+            replicatLogEntries raft'
+   	
 
 
 
@@ -461,7 +475,7 @@ TODO
 2. receiveMsgAsFollower  ->  need to implement  AppendEntrie Messages
 3. In tallyVotes I need to take care of the fact that he may recieve a heartbeat message from another leader or a RequestForVote from another candidate. 
 
-5. Debug: When both are candidates shit hits the fan. ( debugged )
+
 
 7. In runAsFollower right now only timing out if i don't receive a message for a certain amount of time.
    need to time out if i during that amount of time, I haven't received a heartbeat or given a vote regardless of what messages i've received.
