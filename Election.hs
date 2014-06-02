@@ -2,6 +2,7 @@
 import Network.Socket
 import Control.Monad
 import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.MVar
 import Control.Exception
 import Data.List 
 import System.Environment (getArgs)
@@ -388,10 +389,43 @@ replicatLogEntries :: RaftState  -> IO ()
 replicatLogEntries raft = do
   let dicts = getDictFromLeaderRole $ role raft
       mySocketAddr = (getMySockAddr raft)
+      filteredPeerList = (extractSockAddr $ getPeerList raft)
   case dicts of
     Just (nextIndexMap, matchIndexMap)  -> bracket (socket AF_INET Datagram 0) sClose $ \s -> do
       bind s mySocketAddr
-      mapM (sendAppendEntryMessage raft s nextIndexMap ) (extractSockAddr $ getPeerList raft)
+      mapM (sendAppendEntryMessage raft s nextIndexMap ) filteredPeerList
+      -- now need to hear their replies
+      -- creating two MVar's
+      dictMVar  <- newMVar (nextIndexMap, matchIndexMap) -- seed it with the two tuples.
+      followerMVar  <- newMVar (False) -- if this is true then leader has to become a follower
+      mapM (\peer  ->  void $ forkIO $ do -- ^ remove forkIO if it causes problems; but it shouldn't as socket is bound outside the scope. 
+               rslt  <- timeout heartbeatTimer NBS.recvFrom s -- ^ timeout exists to not get stuck on this blockig call. 
+               case rslt of
+                 Nothing  -> return ()
+                 (Just (buf, sender)) -> case decode buf of
+                   (MAppendEntriesReply msgReply)  -> if success msgReply
+                                                      then do
+                                                        (ni, mi) <- takeMVar dictMVar
+                                                        let logLen = length $ getlog raft
+                                                            ni' = Map.insert sender logLen ni
+                                                            mi' = Map.insert sender (logLen - 1) mi
+                                                        putMVar dictMVar (ni', mi') --update the value.
+                                                      else 
+                                                        if appTerm msgReply > currentTerm raft
+                                                        then do
+                                                          _  <- takeMVar followerMVar
+                                                          putMVar followerMVar True
+                                                        else do
+                                                          (ni, mi) <- takeMVar dictMVar
+                                                          let logLen = length $ getlog raft
+                                                              currVal = Map.findWithDefault 0 sender ni
+                                                              newVal = currVal - 1 
+                                                          ni' = Map.insert sender newVal  ni
+                                                          putMVar (ni', mi)
+                   otherwise  -> putStrLn "Error! received something other than AppendEntriesReply"
+           ) filteredPeerList
+        -- Now to inspect the MVars, update relevant state and recurse or not.
+        -- if things are hunky dory may even have to update the commitIndex of the leaders State
     Nothing  -> putStrLn "Error! replicate Entry should only be called by leader."
   
 
@@ -411,7 +445,8 @@ sendAppendEntryMessage raft dict s sa = do
                                  ,entries = drop val log 
                                  }
       msg = MAppendEntries msgPayload
-    void $ NBS.sendTo s (encode msg) sa
+      hb = MHeartbeat msgPayload
+    if val == logLen then void $ NBS.sendTo s (encode msg) sa else void $ NBS.sendTo s (encode hb) sa 
 
     
     
