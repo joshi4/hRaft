@@ -74,7 +74,7 @@ data AppendEntries = AppendEntries {
 data AppendEntriesReply = AppendEntriesReply {
   appTerm :: Term,
   success :: Bool
-  }
+  } deriving (Show, Generic)
 
 data RequestVote = RequestVote {
   cTerm :: Term
@@ -137,6 +137,7 @@ instance Serialize Message
 instance Serialize Role 
 instance Serialize LogBlock
 instance Serialize AppendEntries
+instance Serialize AppendEntriesReply
 instance Serialize LeaderState
 
 
@@ -356,9 +357,9 @@ runAsLeader raft = do
         case newByteString of
           Nothing  -> replicatLogEntries raft 
           (Just buf)  -> do
-            let newLogBlock = createLogBlock buf
+            let newLogBlock = createLogBlock raft buf
                 oldLog = getlog raft
-                newLog = oldLog ++ newLogBlock
+                newLog = oldLog ++ [newLogBlock]
                 raft' = raft {getlog = newLog }
             putStrLn $ "====== Received message " ++ case decode buf of
               Right s  -> s
@@ -403,29 +404,30 @@ replicatLogEntries raft = do
       dictMVar  <- newMVar (nextIndexMap, matchIndexMap) -- seed it with the two tuples.
       followerMVar  <- newMVar (False) -- if this is true then leader has to become a follower
       mapM (\peer  ->  void $ forkIO $ do -- ^ remove forkIO if it causes problems; but it shouldn't as socket is bound outside the scope. 
-               rslt  <- timeout heartbeatTimer NBS.recvFrom s -- ^ timeout exists to not get stuck on this blockig call. 
+               rslt  <- timeout heartbeatTimer $  NBS.recvFrom s 0x10000 -- ^ timeout exists to not get stuck on this blockig call. 
                case rslt of
                  Nothing  -> return ()
                  (Just (buf, sender)) -> case decode buf of
-                   (MAppendEntriesReply msgReply)  -> if success msgReply
-                                                      then do
-                                                        (ni, mi) <- takeMVar dictMVar
-                                                        let logLen = length $ getlog raft
-                                                            ni' = Map.insert sender logLen ni
-                                                            mi' = Map.insert sender (logLen - 1) mi
-                                                        putMVar dictMVar (ni', mi') --update the value.
-                                                      else 
-                                                        if appTerm msgReply > currentTerm raft
-                                                        then do
-                                                          _  <- takeMVar followerMVar
-                                                          putMVar followerMVar True
-                                                        else do
-                                                          (ni, mi) <- takeMVar dictMVar
-                                                          let logLen = length $ getlog raft
-                                                              currVal = Map.findWithDefault 0 sender ni
-                                                              newVal = currVal - 1 
-                                                          ni' = Map.insert sender newVal  ni
-                                                          putMVar (ni', mi)
+                   (Left err)  -> putStrLn $ "Error in decoding message ____ " ++ err                   
+                   Right (MAppendEntriesReply msgReply)  -> if success msgReply
+                                                            then do
+                                                              (ni, mi) <- takeMVar dictMVar
+                                                              let logLen = length $ getlog raft
+                                                                  ni' = Map.insert sender logLen ni
+                                                                  mi' = Map.insert sender (logLen - 1) mi
+                                                              putMVar dictMVar (ni', mi') --update the value.
+                                                            else 
+                                                              if appTerm msgReply > currentTerm raft
+                                                              then do
+                                                                _  <- takeMVar followerMVar
+                                                                putMVar followerMVar True
+                                                              else do
+                                                                (ni, mi) <- takeMVar dictMVar
+                                                                let logLen = length $ getlog raft
+                                                                    currVal = Map.findWithDefault 0 sender ni
+                                                                    newVal = currVal - 1 
+                                                                    ni' = Map.insert sender newVal  ni
+                                                                putMVar dictMVar (ni', mi)
                    otherwise  -> putStrLn "Error! received something other than AppendEntriesReply"
            ) filteredPeerList
         -- Now to inspect the MVars, update relevant state and recurse or not.
@@ -440,7 +442,7 @@ replicatLogEntries raft = do
         let newLS = oldLS {nextIndexDict = nid,
                            matchIndexDict = mid
                           }
-            newCommitIndex = updateCommitIndex [v | (_,v) <- mid ] (commitIndex raft)
+            newCommitIndex = updateCommitIndex [v | (_,v) <- Map.toList mid ] (commitIndex raft)
             raftUpdated = raft {role = Leader newLS,
                                  commitIndex = newCommitIndex
                                }
@@ -452,7 +454,7 @@ replicatLogEntries raft = do
 -- takes list of matchedIndices, leaders current commitIndex
 -- returns updatedCommitIndex     
 updateCommitIndex :: [Int]  -> Int  -> Int
-updateCommitIndex miL oldC = sortBy sortDesc (oldC : miL)
+updateCommitIndex miL oldC = head $ drop  majority $ sortBy sortDesc (oldC : miL)
   where
     sortDesc :: Int  -> Int  -> Ordering
     sortDesc a b = if a < b then GT else LT 
@@ -461,19 +463,21 @@ updateCommitIndex miL oldC = sortBy sortDesc (oldC : miL)
 -- Based on nextIndexDict value for a particular peer and length of the log
 -- if length == nextIndex then it becomes a heartbeat
 sendAppendEntryMessage :: RaftState -> Socket -> Map.Map SockAddr Int  -> SockAddr -> IO ()
-sendAppendEntryMessage raft dict s sa = do
+sendAppendEntryMessage raft s dict sa = do
   let val = (Map.findWithDefault 0 sa dict) 
       log = getlog raft
       logLen = length log
       msgPayload = AppendEntries {leaderTerm = currentTerm raft
                                  ,leaderId = getMySockAddr raft
                                  ,prevLogIndex = val - 1
-                                 ,prevLogTerm = log  !! (val - 1)
+                                 ,prevLogTerm = logterm $ log  !! (val - 1)
                                  ,entries = drop val log 
                                  }
       msg = MAppendEntries msgPayload
       hb = MHeartbeat msgPayload
-    if val == logLen then void $ NBS.sendTo s (encode msg) sa else void $ NBS.sendTo s (encode hb) sa 
+  if val == logLen
+    then void $ NBS.sendTo s (encode msg) sa
+    else void $ NBS.sendTo s (encode hb) sa 
 
     
     
