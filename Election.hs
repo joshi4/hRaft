@@ -51,6 +51,7 @@ getLastLogTerm l = let index = getLastLogIndex l
                     if index == 0 then 0  else logterm  (l !! index ) 
 
 
+
 data Message = MRequestVote RequestVote
              | MRequestVoteReply RequestVoteReply
              | MAppendEntries AppendEntries
@@ -288,6 +289,9 @@ sendMessage msg myaddr peer = bracket (socket AF_INET Datagram 0) sClose
 
 
 
+extractSockAddr :: [(String, SockAddr)] -> [SockAddr]
+extractSockAddr xs = [sa | (_,sa) <- xs ]
+
 getMySockAddr :: RaftState  -> SockAddr
 getMySockAddr raft = let myid = myNode raft
                          config = participantsMap raft
@@ -315,9 +319,7 @@ changeRoleToCandidate raft = raft { role = Candidate
 changeRoleToLeader :: RaftState  -> RaftState
 changeRoleToLeader raft = raft { role = Leader $ initLeaderState }
   where
-    extractSockAddr :: [(String, SockAddr)] -> [SockAddr]
-    extractSockAddr xs = [sa | (_,sa) <- xs ]
-    defNextIndex = getLastLogIndex $ getlog raft
+    defNextIndex = length $ getlog raft -- ^ if log is empty then nextIndex to send is zero. 
     defMatchIndex = 0
     filteredPeerList = (extractSockAddr $ getPeerList raft)
     nextIndexList = zip  filteredPeerList (cycle [defNextIndex])
@@ -375,6 +377,49 @@ listenToClient raft  = do
                                              )
 
       
+
+getDictFromLeaderRole :: Role  -> Maybe (Map.Map SockAddr Int , Map.Map SockAddr Int )
+getDictFromLeaderRole role' = case role' of
+  (Leader state) -> Just (nextIndexDict state, matchIndexDict state )
+  otherwise  -> Nothing 
+
+
+replicatLogEntries :: RaftState  -> IO ()
+replicatLogEntries raft = do
+  let dicts = getDictFromLeaderRole $ role raft
+      mySocketAddr = (getMySockAddr raft)
+  case dicts of
+    Just (nextIndexMap, matchIndexMap)  -> bracket (socket AF_INET Datagram 0) sClose $ \s -> do
+      bind s mySocketAddr
+      mapM (sendAppendEntryMessage raft s nextIndexMap ) (extractSockAddr $ getPeerList raft)
+    Nothing  -> putStrLn "Error! replicate Entry should only be called by leader."
+  
+
+
+
+-- Based on nextIndexDict value for a particular peer and length of the log
+-- if length == nextIndex then it becomes a heartbeat
+sendAppendEntryMessage :: RaftState -> Socket -> Map.Map SockAddr Int  -> SockAddr -> IO ()
+sendAppendEntryMessage raft dict s sa = do
+  let val = (Map.findWithDefault 0 sa dict) 
+      log = getlog raft
+      logLen = length log
+      msgPayload = AppendEntries {leaderTerm = currentTerm raft
+                                 ,leaderId = getMySockAddr raft
+                                 ,prevLogIndex = val - 1
+                                 ,prevLogTerm = log  !! (val - 1)
+                                 ,entries = drop val log 
+                                 }
+      msg = MAppendEntries msgPayload
+    void $ NBS.sendTo s (encode msg) sa
+
+    
+    
+                        
+
+
+
+
 
 runAsCandidate :: RaftState  ->  IO ()
 runAsCandidate raft' = do
