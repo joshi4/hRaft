@@ -258,6 +258,9 @@ handleRequestVote raft reqV peer
 
 
 
+handleAppendEntries :: RaftState  -> AppendEntries  ->  SockAddr  -> ()
+
+
 -- Where it receives all the different kinds of messages a follower can receive.
 -- Heartbeat, AppenEntries, RequetVote
 receiveMsgAsFollower :: RaftState ->  IO (Maybe ( (Message, RaftState), SockAddr) )
@@ -277,7 +280,8 @@ receiveMsgAsFollower raft = receiveMsg' ( participantsMap raft)
           (Just (buf, peer))  ->  case decode buf of      -- ^ if there is a message ; need to figure out which one it is.       
             Left err  ->  return $ Nothing -- ^ ill formated message ; couldn't decoded it. 
             Right (MRequestVote reqV)  -> putStrLn ("Received message from candidate " ++  (show peer)) >> return (Just (handleRequestVote raft reqV peer , peer) ) -- ^ RequestToVote message
-            Right (MHeartbeat _) -> putStrLn ("Received heartbeat form leader " ++ show peer ) >> return ( Just ( (Empty, raft) , peer )) 
+            Right (MHeartbeat _) -> putStrLn ("Received heartbeat form leader " ++ show peer ) >> return ( Just ( (Empty, raft) , peer ))
+            Right (MAppendEntriesReply msg)  -> putStrLn ("Received ARPC from leader from " ++ show peer) >> return (Just (handleAppendEntries raft msg peer , peer)
             Right _  ->  return $ Nothing
           
 
