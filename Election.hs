@@ -180,7 +180,7 @@ initRaftState config node = Raft {
   ,role = Follower
   ,votedFor = Nothing
   ,myNode = node
-  ,getlog = []
+  ,getlog = [LogBlock {logterm = 0 , instruction = encode ""}]
   ,commitIndex = 0 
   ,electionTimeOut = 0 -- ^ Keeping ths a pure function, check initSystem for fix.
   ,participantsMap = config
@@ -381,7 +381,7 @@ runAsLeader raft = do
 	putStrLn " I am the leader now "
         newByteString  <- timeout heartbeatTimer $ listenToClient raft
         case newByteString of
-          Nothing  -> replicatLogEntries raft 
+          Nothing  -> putStrLn "Nothing" >> replicatLogEntries raft 
           (Just buf)  -> do
             let newLogBlock = createLogBlock raft buf
                 oldLog = getlog raft
@@ -422,43 +422,47 @@ replicatLogEntries raft = do
       filteredPeerList = (extractSockAddr $ getPeerList raft)
   case dicts of
     Nothing  -> putStrLn "Error! replicate Entry should only be called by leader."
-    Just (nextIndexMap, matchIndexMap)  -> bracket (socket AF_INET Datagram 0) sClose $ \s -> do
-      bind s mySocketAddr
-      mapM (sendAppendEntryMessage raft s nextIndexMap ) filteredPeerList
-      -- now need to hear their replies
-      -- creating two MVar's
+    Just (nextIndexMap, matchIndexMap)  -> do
       dictMVar  <- newMVar (nextIndexMap, matchIndexMap) -- seed it with the two tuples.
       followerMVar  <- newMVar False -- if this is true then leader has to become a follower
       newTermMVar  <-  newMVar (0 ::Int)
-      mapM (\peer  ->  void $ forkIO $ do -- ^ remove forkIO if it causes problems; but it shouldn't as socket is bound outside the scope. 
-               rslt  <- timeout heartbeatTimer $  NBS.recvFrom s 0x10000 -- ^ timeout exists to not get stuck on this blockig call. 
-               case rslt of
-                 Nothing  -> return ()
-                 (Just (buf, sender)) -> case decode buf of
-                   (Left err)  -> putStrLn $ "Error in decoding message ____ " ++ err                   
-                   Right (MAppendEntriesReply msgReply)  -> if success msgReply
-                                                            then do
-                                                              (ni, mi) <- takeMVar dictMVar
-                                                              let logLen = length $ getlog raft
-                                                                  ni' = Map.insert sender logLen ni
-                                                                  mi' = Map.insert sender (logLen - 1) mi
-                                                              putMVar dictMVar (ni', mi') --update the value.
-                                                            else 
-                                                              if appTerm msgReply > currentTerm raft
-                                                              then do
-                                                                _  <- takeMVar followerMVar
-                                                                putMVar followerMVar True
-                                                                _  <- takeMVar newTermMVar
-                                                                putMVar newTermMVar (appTerm msgReply)
-                                                              else do
-                                                                (ni, mi) <- takeMVar dictMVar
-                                                                let logLen = length $ getlog raft
-                                                                    currVal = Map.findWithDefault 0 sender ni
-                                                                    newVal = currVal - 1 
-                                                                    ni' = Map.insert sender newVal  ni
-                                                                putMVar dictMVar (ni', mi)
-                   otherwise  -> putStrLn "Error! received something other than AppendEntriesReply"
-           ) filteredPeerList
+      bracket (socket AF_INET Datagram 0) (\s  -> do
+                                                  bool  <- NBS.isBound s
+                                                  if bool then sClose s else return ()
+                                          ) (\s -> do
+                                                    bind s mySocketAddr
+                                                    mapM (sendAppendEntryMessage raft s nextIndexMap ) filteredPeerList
+                                                    -- now need to hear their replies
+                                                    mapM (\peer  ->  void $ do -- ^ remove forkIO if it causes problems; but it shouldn't be 
+                                                             rslt  <- timeout heartbeatTimer $ NBS.recvFrom s 0x10000 -- ^ timeout exists to not get stuck on this blockig call. 
+                                                             case rslt of
+                                                               Nothing  -> return ()
+                                                               (Just (buf, sender)) -> case decode buf of
+                                                                 (Left err)  -> putStrLn $ "Error in decoding message ____ " ++ err                   
+                                                                 Right (MAppendEntriesReply msgReply)  -> if success msgReply
+                                                                                                          then do
+                                                                                                            (ni, mi) <- takeMVar dictMVar
+                                                                                                            let logLen = length $ getlog raft
+                                                                                                                ni' = Map.insert sender logLen ni
+                                                                                                                mi' = Map.insert sender (logLen - 1) mi
+                                                                                                            putMVar dictMVar (ni', mi') --update the value.
+                                                                                                          else 
+                                                                                                            if appTerm msgReply > currentTerm raft
+                                                                                                            then do
+                                                                                                              _  <- takeMVar followerMVar
+                                                                                                              putMVar followerMVar True
+                                                                                                              _  <- takeMVar newTermMVar
+                                                                                                              putMVar newTermMVar (appTerm msgReply)
+                                                                                                            else do
+                                                                                                              (ni, mi) <- takeMVar dictMVar
+                                                                                                              let logLen = length $ getlog raft
+                                                                                                                  currVal = Map.findWithDefault 0 sender ni
+                                                                                                                  newVal = currVal - 1 
+                                                                                                                  ni' = Map.insert sender newVal  ni
+                                                                                                              putMVar dictMVar (ni', mi)
+                                                                 otherwise  -> putStrLn "Error! received something other than AppendEntriesReply"
+                                                         ) filteredPeerList
+                                            )
         -- Now to inspect the MVars, update relevant state and recurse or not.
         -- if things are hunky dory may even have to update the commitIndex of the leaders State
       turnToFollower  <- takeMVar followerMVar
@@ -476,6 +480,7 @@ replicatLogEntries raft = do
             raftUpdated = raft {role = Leader newLS,
                                  commitIndex = newCommitIndex
                                }
+        
         runAsLeader raftUpdated
 
   
@@ -499,8 +504,8 @@ sendAppendEntryMessage raft s dict sa = do
       logLen = length log
       msgPayload = AppendEntries {leaderTerm = currentTerm raft
                                  ,leaderId = getMySockAddr raft
-                                 ,prevLogIndex = val - 1
-                                 ,prevLogTerm = logterm $ log  !! (val - 1)
+                                 ,prevLogIndex = max (val - 1) 0 
+                                 ,prevLogTerm = logterm $ log  !! ( max (val - 1) 0 ) 
                                  ,entries = drop val log 
                                  }
       msg = MAppendEntries msgPayload
@@ -508,13 +513,6 @@ sendAppendEntryMessage raft s dict sa = do
   if val == logLen
     then void $ NBS.sendTo s (encode msg) sa
     else void $ NBS.sendTo s (encode hb) sa 
-
-    
-    
-                        
-
-
-
 
 
 runAsCandidate :: RaftState  ->  IO ()
@@ -599,10 +597,6 @@ tallyVotes raft voteCount
                                
                              
 
-testCC :: String  -> IO ()
-testCC str = do
-  raft  <-  initSystem str
-  runAsCandidate (raft {role = Candidate})
 
 runSystem :: RaftState  -> IO ()
 runSystem raft = case role raft of
@@ -615,39 +609,59 @@ main :: IO ()
 main = do
   args  <- getArgs  -- this will be a value : what node number is this
   raft  <- initSystem (head args)
-  runSystem raft
+  --runSystem raft
+  runAsLeader $ changeRoleToLeader raft 
+
+
+-- ============= TEST CODE ==========
+
+testCC :: String  -> IO ()
+testCC str = do
+  raft  <-  initSystem str
+  runAsCandidate (raft {role = Candidate})
+
+
+testF :: String  -> IO ()
+testF str = do
+  raft  <- initSystem str
+  runAsFollower $ raft {role = Follower}
 
 
 
+testLeaderNoClient :: String  -> IO ()
+testLeaderNoClient str  = do
+  raft  <-  initSystem str
+  runAsLeader $ changeRoleToLeader raft 
+
+
+-- ============= END OF TEST CODE ==========
+  
 
 
 {-
 
 TODO
 
-1. sendMessage does not retry if peer is down. ( need a way of detecting that.)
-2. receiveMsgAsFollower  ->  need to implement  AppendEntrie Messages
-3. In tallyVotes I need to take care of the fact that he may recieve a heartbeat message from another leader or a RequestForVote from another candidate. 
-
-
-
+1. sendMessage does not retry if peer is down. ( need a way of detecting that.) [ done. ]
+2. receiveMsgAsFollower  ->  need to implement  AppendEntrie Messages [ done ]
+3. In tallyVotes I need to take care of the fact that he may recieve a heartbeat message from another leader or a RequestForVote from another candidate. [ done ]
 7. In runAsFollower right now only timing out if i don't receive a message for a certain amount of time.
-   need to time out if i during that amount of time, I haven't received a heartbeat or given a vote regardless of what messages i've received.
-
-
-9. If candidate/follower receives heartbeat whose term is out of date, leader should quit and become a follower, update term to up to date value.
+   need to time out if i during that amount of time, I haven't received a heartbeat or given a vote regardless of what messages i've received. [ low priority]
+9. If candidate/follower receives heartbeat whose term is out of date, leader should quit and become a follower, update term to up to date value [ done ]
 
 -}
       
 {-
 
-important notes
-1. if teh followeres crash or run slowly, leader retries AppendEntriesRPC indefinitely ( even after it has responded to the client )
-   until all followeres eventually store all log entries.
-2. Next Steps : Leader State  -> Candidate State  -> AppendEntriesRPC  -> Adhere to Election and Commit Safety Rules 
+TESTING:
+
+LEADER:
+
+1. Run As leader alone ( without Client )
+2. run as leader alone + client as running.
+3. run one thing as leader and another as candidate
 
 
-3. if RPC request or response contains T > currentTerm raft then update raft and set it to be a follower
 -}
   
 
