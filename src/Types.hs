@@ -103,7 +103,7 @@ data RaftState = Raft {
 
 -- Instances to serialize stuff so it can be decoded, encoded 
 instance Serialize SockAddr where
-  put sa = let str = show sa  -- ^ convert SAddr to String 
+  put sa = let str = show sa 
            in put str
   -- ^ using the constructor we can convert String to SockAddr
   get = (get :: Get [Char])  >>= (\str  -> return $ (SockAddrUnix str))  
