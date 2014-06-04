@@ -38,7 +38,14 @@ type Log = [LogBlock]
 data LogBlock = LogBlock {
   logterm :: Term, 
   instruction :: BS.ByteString 
-  } deriving (Show, Generic) 
+  } deriving ( Generic) 
+
+instance Show LogBlock where
+  show a = case decode $ instruction a of
+    Left err  -> "error!"
+    Right s  -> s 
+
+
 
 -- functions to get last index and most recent term in the log. 
 getLastLogIndex :: Log  -> Int
@@ -291,7 +298,7 @@ receiveMsgAsFollower raft = receiveMsg' ( participantsMap raft)
   where
     receiveMsg' config k timer = do
       defAddr  <- getBindAddr "0"
-      putStrLn $ "Entered receiveMsg" ++ show k
+      -- putStrLn $ "Entered receiveMsg" ++ show k
       let recvAddr = Map.findWithDefault defAddr  k config
       bracket (socket AF_INET Datagram 0) sClose $ \s -> do
         bind s recvAddr
@@ -301,8 +308,8 @@ receiveMsgAsFollower raft = receiveMsg' ( participantsMap raft)
           (Just (buf, peer))  ->  case decode buf of      -- ^ if there is a message ; need to figure out which one it is.       
             Left err  ->  return $ Nothing -- ^ ill formated message ; couldn't decoded it. 
             Right (MRequestVote reqV)  -> putStrLn ("Received message from candidate " ++  (show peer)) >> return (Just (handleRequestVote raft reqV peer , peer) ) -- ^ RequestToVote message
-            Right (MHeartbeat _) -> putStrLn ("Received heartbeat form leader " ++ show peer ) >> return ( Just ( (Empty, raft) , peer ))
-            Right (MAppendEntries msg)  -> putStrLn ("Received ARPC from leader from " ++ show peer) >> return (Just (handleAppendEntries raft msg , peer))
+            Right (MHeartbeat _) ->  return ( Just ( (Empty, raft) , peer )) -- putStrLn ("Received heartbeat form leader " ++ show peer )
+            Right (MAppendEntries msg)  -> putStrLn ("Received ARPC from leader from " ++ show peer) >> return (Just (handleAppendEntries raft msg , peer)) 
             Right _  ->  return $ Nothing
           
 
@@ -312,9 +319,9 @@ sendMessage :: Message  -> SockAddr -> SockAddr  -> IO ()
 sendMessage msg myaddr peer = bracket (socket AF_INET Datagram 0) sClose
                        (\s  -> do                           
                            bind s myaddr -- ^ don't bind it to peer but bind it to your own address.
-                           putStrLn "Finished binding"
+                           --putStrLn "Finished binding"
                            void $ NBS.sendTo s (encode msg) peer  -- ^ May need some mechanism to retry if it has failed.
-                           putStrLn "end of sendMessage"
+                           -- putStrLn "end of sendMessage"
                        )
 
 
@@ -338,7 +345,7 @@ runAsFollower raft = do
     (Just ( (msg, raft'), peer) )  -> case msg of
       Empty  -> runAsFollower raft' 
       (MRequestVoteReply _)  ->  sendMessage msg myaddr  peer >> runAsFollower raft' -- ^ candidate has been given the reply.
-      (MAppendEntriesReply _)  -> sendMessage msg myaddr peer >> runAsFollower raft' -- ^ leader has been given the reply. 
+      (MAppendEntriesReply _)  -> sendMessage msg myaddr peer >> putStrLn ("**** new log is: " ++ show ( getlog raft')) >>  runAsFollower raft' -- ^ leader has been given the reply. 
     Nothing  -> (putStrLn "timed out") >> runSystem (changeRoleToCandidate raft)
 
 
@@ -378,10 +385,10 @@ createLogBlock raft bs = LogBlock {
 
 runAsLeader :: RaftState  -> IO ()
 runAsLeader raft = do
-	putStrLn " I am the leader now "
+	--putStrLn " I am the leader now "
         newByteString  <- timeout heartbeatTimer $ listenToClient raft
         case newByteString of
-          Nothing  -> putStrLn "Nothing" >> replicatLogEntries raft 
+          Nothing  ->  replicatLogEntries raft 
           (Just buf)  -> do
             let newLogBlock = createLogBlock raft buf
                 oldLog = getlog raft
@@ -460,7 +467,7 @@ replicatLogEntries raft = do
                                                                                                                   newVal = currVal - 1 
                                                                                                                   ni' = Map.insert sender newVal  ni
                                                                                                               putMVar dictMVar (ni', mi)
-                                                                 otherwise  -> putStrLn "Error! received something other than AppendEntriesReply"
+                                                                 Right misc  -> putStrLn $ "Error! received something other than AppendEntriesReply" ++ show misc 
                                                          ) filteredPeerList
                                             )
         -- Now to inspect the MVars, update relevant state and recurse or not.
@@ -652,9 +659,9 @@ TESTING:
 
 LEADER:
 
-1. Run As leader alone ( without Client )
-2. run as leader alone + client as running.
-3. run as normal with all 3 servers running ( client not running  -> Leader should jsut send heartbeats)
+1. Run As leader alone ( without Client ) [ passed ]
+2. run as leader alone + client as running. [ passed ]
+3. run as normal with all 3 servers running ( client not running  -> Leader should jsut send heartbeats) [ passed ]
 3. run one thing as leader and another as candidate
 
 
