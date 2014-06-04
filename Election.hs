@@ -539,11 +539,6 @@ runAsCandidate raft' = do
       (True, raftS)  -> runAsLeader $ changeRoleToLeader raftS
       (False, raftS)  -> if role raftS == Follower then runAsFollower raftS else runAsCandidate raftS -- ^ could be that no one wins election
       
-      
-    
-
-
-
 
 -- Accepts incoming messages to candidate; need to handle case when another leader
 -- sends it a heartbeat
@@ -609,8 +604,8 @@ main :: IO ()
 main = do
   args  <- getArgs  -- this will be a value : what node number is this
   raft  <- initSystem (head args)
-  --runSystem raft
-  runAsLeader $ changeRoleToLeader raft 
+  runSystem raft
+  --runAsLeader $ changeRoleToLeader raft 
 
 
 -- ============= TEST CODE ==========
