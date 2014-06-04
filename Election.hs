@@ -511,8 +511,8 @@ sendAppendEntryMessage raft s dict sa = do
       msg = MAppendEntries msgPayload
       hb = MHeartbeat msgPayload
   if val == logLen
-    then void $ NBS.sendTo s (encode msg) sa
-    else void $ NBS.sendTo s (encode hb) sa 
+    then void $ NBS.sendTo s (encode hb) sa
+    else void $ NBS.sendTo s (encode msg) sa 
 
 
 runAsCandidate :: RaftState  ->  IO ()
@@ -659,6 +659,7 @@ LEADER:
 
 1. Run As leader alone ( without Client )
 2. run as leader alone + client as running.
+3. run as normal with all 3 servers running ( client not running  -> Leader should jsut send heartbeats)
 3. run one thing as leader and another as candidate
 
 
