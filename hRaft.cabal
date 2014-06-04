@@ -17,16 +17,16 @@ cabal-version:       >=1.10
 
 library
   hs-source-dirs:      src
-  exposed-modules: Hraft
-  other-modules:   Utility, Election, Types    
+  exposed-modules: Hraft, Election
+  other-modules:   Utility, Types    
   other-extensions:    DeriveGeneric
   build-depends:       base >=4.6 && <4.7, network >=2.4 && <2.5, containers >=0.5 && <0.6, bytestring >=0.10 && <0.11, cereal >=0.4 && <0.5, random >=1.0 && <1.1
   default-language:    Haskell2010
-  ghc-options: -Wall
+  --ghc-options: -Wall
 
 
 
-executable hraft
+executable hRaft
   main-is: Main.hs
   build-depends:
     base < 5
