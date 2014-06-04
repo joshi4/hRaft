@@ -1,23 +1,19 @@
-{-# LANGUAGE DeriveGeneric #-}
+module Election where 
+
 import Network.Socket
 import Control.Monad
-import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar
 import Control.Exception
 import Data.List 
-import System.Environment (getArgs)
 import qualified Data.Map.Strict as Map
 import qualified Network.Socket.ByteString as NBS 
 import qualified Network.Socket as NBS hiding (send, sendTo, recv, recvFrom )
 import qualified Data.ByteString as BS
-import GHC.Generics
 import Data.Serialize
 import System.Timeout (timeout)
-import System.Random hiding (split) -- ^ for election timer 
 
-type Term = Int
-type Host = String
-type PortNum = String 
+import Types
+import Utility 
 
 
 -- TOP LEVEL DECLARATION FOR TIME OUT --
@@ -25,27 +21,10 @@ type PortNum = String
 
 ---- # GLOBAL CONSTANTS # ----
 
-electionTimerLL = 150000 -- ^ Lower Limit for election Time out 
-electionTimerUL = 500000 -- ^ Upper Limit for election Time out
 heartbeatTimer = 20000 -- ^ Heartbeat timer every 20 ms 
-
 majority = 2 -- ^ Amount of votes a candidate needs to become a leader.
 
 ---- # GLOBAL CONSTANTS END  # ----
-
-type Log = [LogBlock]
-
-data LogBlock = LogBlock {
-  logterm :: Term, 
-  instruction :: BS.ByteString 
-  } deriving ( Generic) 
-
-instance Show LogBlock where
-  show a = case decode $ instruction a of
-    Left err  -> "error!"
-    Right s  -> s 
-
-
 
 -- functions to get last index and most recent term in the log. 
 getLastLogIndex :: Log  -> Int
@@ -60,174 +39,9 @@ getLastLogTerm l = let index = getLastLogIndex l
 
 
 
-data Message = MRequestVote RequestVote
-             | MRequestVoteReply RequestVoteReply
-             | MAppendEntries AppendEntries
-             | MHeartbeat AppendEntries
-             | MAppendEntriesReply AppendEntriesReply
-             | Empty 
-               deriving (Show, Generic)
-
-
-data AppendEntries = AppendEntries {
-  leaderTerm :: Term,
-  leaderId :: SockAddr, -- ^ so follower can redirect the clients
-  prevLogIndex :: Int,
-  prevLogTerm :: Term,
-  entries :: Log -- ^ EMPTY for heartbeat
-  } deriving (Show, Generic )
-
-
-data AppendEntriesReply = AppendEntriesReply {
-  appTerm :: Term,
-  success :: Bool
-  } deriving (Show, Generic)
-
-data RequestVote = RequestVote {
-  cTerm :: Term
-  ,cId :: String
-  ,lastLogIndex :: Int
-  ,lastLogTerm :: Term 
-  } deriving (Show, Generic)
-
-
-data RequestVoteReply = RequestVoteReply {
-  reqVRterm :: Term,
-  voteGranted :: Bool 
-  } deriving (Show, Generic)
-
-
-
-data LeaderState = LeaderState {
-  nextIndexDict :: Map.Map SockAddr Int -- ^ Index of the next log entry leader will send to key. ( init to next expected index in log for leader.)
-  ,matchIndexDict :: Map.Map SockAddr Int -- ^ For each server index of highest log entry known to be replicated on the server. 
-  } deriving (Show, Generic, Eq)
-
-
-type Configuration =   Map.Map String SockAddr
-data Role = Follower
-          | Leader {getLeaderState :: LeaderState }
-          | Candidate
-          deriving (Show, Generic, Eq )
-
-
--- This is going to tell me the state of the particular particpant in the
--- consensus. Its Role (Leader, Follower, Candidate etc) The state
--- that is required
-data RaftState = Raft {
-  leaderID :: Maybe SockAddr  -- ^ Id of the server, still not decided on cloudhaskell or UDP 
-  ,currentTerm :: Term
-  ,role :: Role
-  ,myNode :: String
-  ,getlog :: Log
-  ,commitIndex :: Int -- ^ index of the latest commited entry in the log, in this case its the same as lastAppliesd. 
-  ,votedFor :: Maybe SockAddr -- ^This is the socketAddress converted to a string
-  ,participantsMap :: Configuration
-  ,electionTimeOut :: Int 
-  ,lastApplied :: Int -- ^ Index of highest log entry applied to statemachine 
-  } deriving (Show, Generic)
-
-
-
--- Instances to serialize stuff so it can be decoded, encoded 
-instance Serialize SockAddr where
-  put sa = let str = show sa  -- ^ convert SAddr to String 
-           in put str
-  -- ^ using the constructor we can convert String to SockAddr
-  get = (get :: Get [Char])  >>= (\str  -> return $ (SockAddrUnix str))  
-
-
-instance Serialize RaftState
-instance Serialize RequestVote
-instance Serialize RequestVoteReply
-instance Serialize Message
-instance Serialize Role 
-instance Serialize LogBlock
-instance Serialize AppendEntries
-instance Serialize AppendEntriesReply
-instance Serialize LeaderState
-
-
---- END OF IMPORTS AND DATA DECLARATIONS ---- 
-
 incrementTerm :: Term  -> Term
 incrementTerm t = t+1
 
-
-getBindAddr :: String -> IO SockAddr
-getBindAddr port = do
- ai:_ <- getAddrInfo (Just defai) Nothing (Just port)
- return $ addrAddress ai
- where defai = defaultHints { addrFlags = [AI_PASSIVE]
-                            , addrFamily = AF_INET }
-
-
-getSockAddr :: (Host , PortNum) -> IO SockAddr
-getSockAddr (name , port) = do
- ai:_ <- getAddrInfo (Just defai) (Just name) (Just port)
- return $ addrAddress ai
- where defai = defaultHints { addrFamily = AF_INET
-                            , addrSocketType = Datagram }
-
-
-{-   INITIALIZATION CODE   -}
-
-
-initConfiguration :: IO Configuration
-initConfiguration = do
-  sAddr  <- mapM getSockAddr [("localhost", "8003"), ("localhost", "8001"), ("localhost", "8002")]
-  let dictList = zip ["1","2", "3"] sAddr
-  return $ Map.fromList dictList
-
-
-initRaftState :: Configuration  -> String -> RaftState
-initRaftState config node = Raft {
-  leaderID = Nothing
-  ,currentTerm = 0
-  ,role = Follower
-  ,votedFor = Nothing
-  ,myNode = node
-  ,getlog = [LogBlock {logterm = 0 , instruction = encode ""}]
-  ,commitIndex = 0 
-  ,electionTimeOut = 0 -- ^ Keeping ths a pure function, check initSystem for fix.
-  ,participantsMap = config
-  ,lastApplied = 0 
-  }
-
-initSystem :: String  -> IO RaftState
-initSystem node = do
-  configuration  <- initConfiguration
-  electionTimer  <- getStdRandom (randomR (electionTimerLL, electionTimerUL )) 
-  rs  <- return $ initRaftState configuration node
-  return $ rs {electionTimeOut = electionTimer}
-   
-{-   INITIALIZATION CODE ENDS HERE    -}
-
-sendMessageTillSuccess :: Socket  -> SockAddr  -> IO ()
-sendMessageTillSuccess s sa  = do
-  bytesSent  <- NBS.sendTo s (encode 'A') sa
-  putStrLn $ show bytesSent
-  if bytesSent > 0 then return () else sendMessageTillSuccess s sa 
-
--- broadcasts the given message to all other nodes. 
-broadCastMessage :: RaftState  -> Message  -> IO ()
-broadCastMessage raft msg = do
-  putStrLn "Entered braodcast"
-  let peerList = getPeerList raft
-      mySocketAddr = getMySockAddr raft 
-  void $ mapM (\(k,peer) ->   do -- removed the forkIO 
-                  sendMessage msg mySocketAddr peer
-              ) peerList 
-
--- Utility function that is used to get list of peers
--- does not include myself.   
-getPeerList :: RaftState  -> [(String, SockAddr)]
-getPeerList raft = (Map.toList config) \\ [(self, mySocketAddr)]
-  where
-    config = participantsMap raft
-    self = myNode raft
-    mySocketAddr = getMySockAddr raft
-    
            
 
 -- Abstracted away the check " candidate is atleast as up to date as server it is requesting for vote"
@@ -291,6 +105,20 @@ handleAppendEntries raft msg  | leaderterm < myTerm  = (failReply, raft )
 
 -- Where it receives all the different kinds of messages a follower can receive.
 -- Heartbeat, AppenEntries, RequetVote
+          
+
+runAsFollower :: RaftState  -> IO ()
+runAsFollower raft = do
+  result  <- receiveMsgAsFollower raft 
+  let myaddr = getMySockAddr raft 
+  case result of
+    (Just ( (msg, raft'), peer) )  -> case msg of
+      Empty  -> runAsFollower raft' 
+      (MRequestVoteReply _)  ->  sendMessage msg myaddr  peer >> runAsFollower raft' -- ^ candidate has been given the reply.
+      (MAppendEntriesReply _)  -> sendMessage msg myaddr peer >> putStrLn ("**** new log is: " ++ show ( getlog raft')) >>  runAsFollower raft' -- ^ leader has been given the reply. 
+    Nothing  -> (putStrLn "timed out") >> runSystem (changeRoleToCandidate raft)
+
+
 receiveMsgAsFollower :: RaftState ->  IO (Maybe ( (Message, RaftState), SockAddr) )
 receiveMsgAsFollower raft = receiveMsg' ( participantsMap raft)
                   (myNode raft)
@@ -311,42 +139,9 @@ receiveMsgAsFollower raft = receiveMsg' ( participantsMap raft)
             Right (MHeartbeat _) ->  return ( Just ( (Empty, raft) , peer )) -- putStrLn ("Received heartbeat form leader " ++ show peer )
             Right (MAppendEntries msg)  -> putStrLn ("Received ARPC from leader from " ++ show peer) >> return (Just (handleAppendEntries raft msg , peer)) 
             Right _  ->  return $ Nothing
-          
+
 
     
--- Simple version , not retrying if failed: i:e when peer is down/shutoff.   
-sendMessage :: Message  -> SockAddr -> SockAddr  -> IO ()
-sendMessage msg myaddr peer = bracket (socket AF_INET Datagram 0) sClose
-                       (\s  -> do                           
-                           bind s myaddr -- ^ don't bind it to peer but bind it to your own address.
-                           --putStrLn "Finished binding"
-                           void $ NBS.sendTo s (encode msg) peer  -- ^ May need some mechanism to retry if it has failed.
-                           -- putStrLn "end of sendMessage"
-                       )
-
-
-
-extractSockAddr :: [(String, SockAddr)] -> [SockAddr]
-extractSockAddr xs = [sa | (_,sa) <- xs ]
-
-getMySockAddr :: RaftState  -> SockAddr
-getMySockAddr raft = let myid = myNode raft
-                         config = participantsMap raft
-                     in
-                      case Map.lookup myid config of
-                        Nothing  -> undefined -- ^ Error should not happen 
-                        (Just x ) -> x 
-
-runAsFollower :: RaftState  -> IO ()
-runAsFollower raft = do
-  result  <- receiveMsgAsFollower raft 
-  let myaddr = getMySockAddr raft 
-  case result of
-    (Just ( (msg, raft'), peer) )  -> case msg of
-      Empty  -> runAsFollower raft' 
-      (MRequestVoteReply _)  ->  sendMessage msg myaddr  peer >> runAsFollower raft' -- ^ candidate has been given the reply.
-      (MAppendEntriesReply _)  -> sendMessage msg myaddr peer >> putStrLn ("**** new log is: " ++ show ( getlog raft')) >>  runAsFollower raft' -- ^ leader has been given the reply. 
-    Nothing  -> (putStrLn "timed out") >> runSystem (changeRoleToCandidate raft)
 
 
 changeRoleToCandidate :: RaftState  -> RaftState
@@ -600,6 +395,7 @@ tallyVotes raft voteCount
                              
 
 
+
 runSystem :: RaftState  -> IO ()
 runSystem raft = case role raft of
   Follower  -> runAsFollower raft
@@ -607,14 +403,7 @@ runSystem raft = case role raft of
   Candidate  -> runAsCandidate raft 
 
 
-main :: IO ()
-main = do
-  args  <- getArgs  -- this will be a value : what node number is this
-  raft  <- initSystem (head args)
-  runSystem raft
-  --runAsLeader $ changeRoleToLeader raft 
-
-
+{- 
 -- ============= TEST CODE ==========
 
 testCC :: String  -> IO ()
@@ -638,7 +427,7 @@ testLeaderNoClient str  = do
 
 -- ============= END OF TEST CODE ==========
   
-
+-}
 
 {-
 
