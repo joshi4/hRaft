@@ -236,8 +236,8 @@ candidateUpToDateCheck raft reqV peer  = let myTerm = currentTerm raft
                                              check _myTerm _cTerm | _myTerm == _cTerm = if cLogLastIndex >= myLogLastIndex
                                                                                     then ((MRequestVoteReply newReqVT), raft')
                                                                                     else ((MRequestVoteReply newReqVF ),raft )
-                                                                | _myTerm > _cTerm = ((MRequestVoteReply newReqVF) , raft)
-                                                                | otherwise = ((MRequestVoteReply newReqVT) , raft)
+                                                                  | _myTerm > _cTerm = ((MRequestVoteReply newReqVF) , raft)
+                                                                  | otherwise = ((MRequestVoteReply newReqVT) , raft)
                                          in                                                                                       
                                             check myLogLastTerm cLogLastTerm 
                                             
@@ -258,21 +258,27 @@ handleRequestVote raft reqV peer
 
 
 
-handleAppendEntries :: RaftState  -> AppendEntries  ->  SockAddr  -> (Message, RaftState)
-handleAppendEntries raft msg peer | leaderterm < myTerm  = (failReply, raft )
-                                  | logConsistencyCheck log indexForMatch termForMatch == False = (failReply, failUpdateRaft raft)
-                                  | otherwise = (successReply, succUpdateRaft raft )
+handleAppendEntries :: RaftState  -> AppendEntries  -> (Message, RaftState)
+handleAppendEntries raft msg  | leaderterm < myTerm  = (failReply, raft )
+                              | logConsistencyCheck log indexForMatch termForMatch == False = (failReply, failUpdateRaft raft)
+                              | otherwise = (successReply, succUpdateRaft raft ) 
   where 
     myTerm = currentTerm raft
-    log = entries raft 
+    log = getlog raft 
     leaderterm = leaderTerm msg
     indexForMatch = prevLogIndex msg
     termForMatch = prevLogTerm msg
     failReply = MAppendEntriesReply $ AppendEntriesReply {appTerm = myTerm ,success = False }
     successReply = MAppendEntriesReply $ AppendEntriesReply {appTerm = myTerm, success = True }
+    succUpdateRaft :: RaftState  -> RaftState
+    succUpdateRaft r = r {getlog = log ++ entries msg, currentTerm = leaderterm } -- ^ either its the same or we have correctly updated the term
+    failUpdateRaft :: RaftState  -> RaftState
+    failUpdateRaft r | length log <= indexForMatch = r 
+                     | logterm (log !! indexForMatch) /= termForMatch = r { getlog = take indexForMatch log, currentTerm = leaderterm }
+                     | otherwise = r 
     logConsistencyCheck :: Log  -> Int  -> Term  -> Bool
-    logConsistencyCheck l i t | length log <= indexForMatch = False
-                              | logterm (log !! indexForMatch) /= termForMatch = False
+    logConsistencyCheck l i t | length l <= i = False
+                              | logterm (log !! i) /= t = False
                               | otherwise = True 
 
 
@@ -296,7 +302,7 @@ receiveMsgAsFollower raft = receiveMsg' ( participantsMap raft)
             Left err  ->  return $ Nothing -- ^ ill formated message ; couldn't decoded it. 
             Right (MRequestVote reqV)  -> putStrLn ("Received message from candidate " ++  (show peer)) >> return (Just (handleRequestVote raft reqV peer , peer) ) -- ^ RequestToVote message
             Right (MHeartbeat _) -> putStrLn ("Received heartbeat form leader " ++ show peer ) >> return ( Just ( (Empty, raft) , peer ))
-            Right (MAppendEntriesReply msg)  -> putStrLn ("Received ARPC from leader from " ++ show peer) >> return (Just (handleAppendEntries raft msg peer , peer)
+            Right (MAppendEntries msg)  -> putStrLn ("Received ARPC from leader from " ++ show peer) >> return (Just (handleAppendEntries raft msg , peer))
             Right _  ->  return $ Nothing
           
 
@@ -331,7 +337,8 @@ runAsFollower raft = do
   case result of
     (Just ( (msg, raft'), peer) )  -> case msg of
       Empty  -> runAsFollower raft' 
-      (MRequestVoteReply _)  ->  sendMessage msg myaddr  peer >> runAsFollower raft' -- ^ candidate has been given the reply. 
+      (MRequestVoteReply _)  ->  sendMessage msg myaddr  peer >> runAsFollower raft' -- ^ candidate has been given the reply.
+      (MAppendEntriesReply _)  -> sendMessage msg myaddr peer >> runAsFollower raft' -- ^ leader has been given the reply. 
     Nothing  -> (putStrLn "timed out") >> runSystem (changeRoleToCandidate raft)
 
 
@@ -421,7 +428,8 @@ replicatLogEntries raft = do
       -- now need to hear their replies
       -- creating two MVar's
       dictMVar  <- newMVar (nextIndexMap, matchIndexMap) -- seed it with the two tuples.
-      followerMVar  <- newMVar (False) -- if this is true then leader has to become a follower
+      followerMVar  <- newMVar False -- if this is true then leader has to become a follower
+      newTermMVar  <-  newMVar (0 ::Int)
       mapM (\peer  ->  void $ forkIO $ do -- ^ remove forkIO if it causes problems; but it shouldn't as socket is bound outside the scope. 
                rslt  <- timeout heartbeatTimer $  NBS.recvFrom s 0x10000 -- ^ timeout exists to not get stuck on this blockig call. 
                case rslt of
@@ -440,6 +448,8 @@ replicatLogEntries raft = do
                                                               then do
                                                                 _  <- takeMVar followerMVar
                                                                 putMVar followerMVar True
+                                                                _  <- takeMVar newTermMVar
+                                                                putMVar newTermMVar (appTerm msgReply)
                                                               else do
                                                                 (ni, mi) <- takeMVar dictMVar
                                                                 let logLen = length $ getlog raft
@@ -452,9 +462,10 @@ replicatLogEntries raft = do
         -- Now to inspect the MVars, update relevant state and recurse or not.
         -- if things are hunky dory may even have to update the commitIndex of the leaders State
       turnToFollower  <- takeMVar followerMVar
+      updatedTerm  <- takeMVar newTermMVar
       if turnToFollower
         then
-        runSystem $ raft { role = Follower }
+        runSystem $ raft { role = Follower, currentTerm = updatedTerm  }
         else do
         let oldLS = getLeaderState $ role raft 
         (nid, mid )  <- takeMVar dictMVar
@@ -569,11 +580,24 @@ tallyVotes raft voteCount
                          Right (MHeartbeat hb)  -> do
                            if leaderTerm hb >= currentTerm raft
                              then do
-                             let raftFollS = raft { role = Follower }                               
+                             let raftFollS = raft { role = Follower, currentTerm = leaderTerm hb }                    
                              return $ (False, raftFollS)
                              else
                              do
+                               sClose s 
                                tallyVotes raft voteCount
+                         Right (MAppendEntries appEnt)  -> do
+                           if leaderTerm appEnt >= currentTerm raft
+                             then do
+                             let (msg, raft') = handleAppendEntries raft appEnt
+                             void $ NBS.sendTo s (encode msg) peer
+                             return $ (False, raft' {role = Follower} )
+                             else
+                             do
+                               sClose s
+                               tallyVotes raft voteCount
+                               
+                             
 
 testCC :: String  -> IO ()
 testCC str = do
@@ -622,6 +646,8 @@ important notes
    until all followeres eventually store all log entries.
 2. Next Steps : Leader State  -> Candidate State  -> AppendEntriesRPC  -> Adhere to Election and Commit Safety Rules 
 
+
+3. if RPC request or response contains T > currentTerm raft then update raft and set it to be a follower
 -}
   
 
@@ -630,3 +656,6 @@ important notes
 
 
                    
+-- Leader when chaging to follower updates his term.
+-- follower too needs to update its term  [done]
+-- does candidate update his term:   [ done ]
