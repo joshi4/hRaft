@@ -189,6 +189,14 @@ runAsLeader raft = do
           Nothing  ->  replicatLogEntries raft 
           (Just buf)  -> do
             -- send message to client to stop resending the same message.
+            clientAddr  <- getSockAddr ("localhost", "9000")
+            let me = getMySockAddr raft
+            bracket (socket AF_INET Datagram 0) sClose (\s  -> do
+                                                 bind s me
+                                                 void $ NBS.sendTo s
+                                                   (encode "recv")
+                                                   clientAddr
+                                             )
             let newLogBlock = createLogBlock raft buf
                 oldLog = getlog raft
                 newLog = oldLog ++ [newLogBlock]
