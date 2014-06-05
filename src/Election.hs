@@ -188,6 +188,7 @@ runAsLeader raft = do
         case newByteString of
           Nothing  ->  replicatLogEntries raft 
           (Just buf)  -> do
+            -- send message to client to stop resending the same message.
             let newLogBlock = createLogBlock raft buf
                 oldLog = getlog raft
                 newLog = oldLog ++ [newLogBlock]
