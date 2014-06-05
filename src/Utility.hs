@@ -9,6 +9,8 @@ import Control.Exception
 import Data.Serialize
 import Data.List
 import Control.Monad
+import System.IO 
+import System.Directory (doesFileExist)
 import Types
 
 -- Simple version , not retrying if failed: i:e when peer is down/shutoff.   
@@ -74,3 +76,41 @@ getSockAddr (name , port) = do
  return $ addrAddress ai
  where defai = defaultHints { addrFamily = AF_INET
                             , addrSocketType = Datagram }
+
+
+
+-- Being hanuman. Instead of stroing the relevant fields
+-- am storing the whole state. Deferring cherry-picking to
+-- read stage        
+writeRaftToFile :: RaftState  -> IO ()
+writeRaftToFile raft = do
+  let path = raftFilePath (myNode raft)
+  BS.writeFile path (encode raft)
+
+
+
+-- Read the binary file and decode it.
+-- only update the required fields with stored content
+-- rest all is volatile state.
+-- if file does not exist then it will take
+-- the initial supplied value.   
+readRaftFile :: RaftState  -> IO RaftState
+readRaftFile raft = do
+  let path = raftFilePath $ myNode raft
+  exists  <- doesFileExist path
+  if exists then
+    do
+      bys <- BS.readFile path
+      case decode bys of
+        Left _  -> putStrLn "Error! in decoding from file " >> return raft
+        Right r  -> return $ raft { currentTerm = currentTerm r ,
+                                    getlog = getlog r ,
+                                    votedFor = votedFor r 
+                                  }
+    else
+    do
+      return raft 
+
+-- Given the node number , generates the file path. 
+raftFilePath :: String  -> FilePath
+raftFilePath node = "/Users/shantanu/" ++ "RaftNode" ++ node ++ ".raft"
