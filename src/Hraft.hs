@@ -41,7 +41,8 @@ initSystem node = do
   configuration  <- initConfiguration
   electionTimer  <- getStdRandom (randomR (electionTimerLL, electionTimerUL )) 
   rs  <- return $ initRaftState configuration node
-  return $ rs {electionTimeOut = electionTimer}
+  rs'  <-  readRaftFile rs -- reads from file if possible
+  return $ rs' {electionTimeOut = electionTimer} -- new random election timer
    
 {-   INITIALIZATION CODE ENDS HERE    -}
 
