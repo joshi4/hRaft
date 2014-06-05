@@ -115,7 +115,10 @@ runAsFollower raft = do
     (Just ( (msg, raft'), peer) )  -> case msg of
       Empty  -> runAsFollower raft' 
       (MRequestVoteReply _)  ->  sendMessage msg myaddr  peer >> runAsFollower raft' -- ^ candidate has been given the reply.
-      (MAppendEntriesReply _)  -> sendMessage msg myaddr peer >> putStrLn ("**** new log is: " ++ show ( getlog raft')) >>  runAsFollower raft' -- ^ leader has been given the reply. 
+      (MAppendEntriesReply rply)  -> do
+        sendMessage msg myaddr peer
+        if success rply then writeRaftToFile raft' else return ()
+        putStrLn ("**** new log is: " ++ show ( getlog raft')) >>  runAsFollower raft' -- ^ leader has been given the reply. 
     Nothing  -> (putStrLn "timed out") >> runSystem (changeRoleToCandidate raft)
 
 
@@ -192,6 +195,7 @@ runAsLeader raft = do
             putStrLn $ "====== Received message " ++ case decode buf of
               Right s  -> s
               otherwise  -> "Error!"
+            writeRaftToFile raft'
             replicatLogEntries raft'
    	
 
@@ -375,7 +379,8 @@ tallyVotes raft voteCount
                          Right (MHeartbeat hb)  -> do
                            if leaderTerm hb >= currentTerm raft
                              then do
-                             let raftFollS = raft { role = Follower, currentTerm = leaderTerm hb }                    
+                             let raftFollS = raft { role = Follower, currentTerm = leaderTerm hb }
+                             writeRaftToFile raftFollS
                              return $ (False, raftFollS)
                              else
                              do
@@ -386,6 +391,7 @@ tallyVotes raft voteCount
                              then do
                              let (msg, raft') = handleAppendEntries raft appEnt
                              void $ NBS.sendTo s (encode msg) peer
+                             writeRaftToFile raft'
                              return $ (False, raft' {role = Follower} )
                              else
                              do
@@ -451,8 +457,9 @@ LEADER:
 1. Run As leader alone ( without Client ) [ passed ]
 2. run as leader alone + client as running. [ passed ]
 3. run as normal with all 3 servers running ( client not running  -> Leader should jsut send heartbeats) [ passed ]
-3. run one thing as leader and another as candidate
-
+3. run one thing as leader and another as candidate [ passed ]
+4. Add Write to Files in correct places for followr, candidate and Leader.
+5. Add Read RaftState in the correct place, will go where we are initializing the system. 
 
 -}
   
