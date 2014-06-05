@@ -44,3 +44,12 @@ initSystem node = do
   return $ rs {electionTimeOut = electionTimer}
    
 {-   INITIALIZATION CODE ENDS HERE    -}
+
+
+testBS :: IO ()
+testBS = do
+  raft  <- initSystem "1"
+  writeRaftToFile raft
+  raft'  <- readRaftFile raft
+  putStrLn $ show raft' 
+  
