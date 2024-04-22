@@ -1,3 +1,3 @@
-###hRaft 
+### hRaft 
 
-will update this later. 
+An implementation of the Raft Consensus Protocol in Haskell. 
